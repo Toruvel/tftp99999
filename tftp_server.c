@@ -78,6 +78,7 @@ int readsoc (struct client *cl){ //read from socket
     uint16_t *p;
     uint16_t *optr;
     uint16_t opcode;
+    uint16_t block;
     char* file_name;
     char* mode;
     
@@ -117,7 +118,7 @@ int readsoc (struct client *cl){ //read from socket
            return(-1);
        }
        cl->file = fopen(file_name, "r");
-       if (cl->file == -1) {
+       if (cl->file == NULL) {
            tftp_error(1);
            return(-1);
        }
@@ -127,16 +128,15 @@ int readsoc (struct client *cl){ //read from socket
        cl->pack = 1;
        *p = htons(cl->pack);
        ++p;
-       len = fread(p, 1, sizeof(512), cl->file);
+       len = fread(p, 1, 512, cl->file);
        if ((rez = send(cl->soc, buf, 4 + len, 0)) < 0) {
            perror("server: sendto()");
            tftp_error(4);
            return(-1);
        }
        cl->process = opcode;
-     }
    }
-   //запрос на записть
+   //запрос на запись
        
     if (opcode == 2){ 
        if (cl->process != 0){
@@ -169,7 +169,7 @@ int readsoc (struct client *cl){ //read from socket
            return(-1);
        }
        cl->file = fopen(file_name, "w");
-       if (cl->file == -1) {
+       if (cl->file == NULL) {
            tftp_error(1);
            return(-1);
        }
@@ -184,23 +184,72 @@ int readsoc (struct client *cl){ //read from socket
            return(-1);
        }
        cl->process = opcode;
-     }
     }
-    
-    if (opcode == 3) { 
-       if (cl->process != 2){
-           tftp_error(4);
-           return(-1);
-       }
+
+    // кусок файла
+    if (opcode == 3) {
+        if (cl->process != 2){
+            tftp_error(4);
+            return(-1);
+        }
+        p = (uint16_t *)(buf+2);
+        block = ntohs(*p);
+        if (block == cl->pack + 1) {
+            if (rez == 4) {  // пустой пакет - файл закончился
+                fclose(cl->file);
+                cl->file = NULL;
+                cl->process = 0;
+                return 0;
+            }
+
+            len = fwrite(buf+4, 1, rez - 4, cl->file);
+
+            cl->pack = block;
+            p = (uint16_t *)buf;
+            *p = htons(4);  // ACK packet
+            ++p;
+            *p = htons(cl->pack);
+            if ((rez = send(cl->soc, buf, 4, 0)) < 0) {
+                perror("server: sendto()");
+                tftp_error(4);
+                return(-1);
+            }
+        } else {
+            // ничего не делаем, ждём другой кусок
+            return 0;
+        }
      }   
-    
-    if (opcode == 4) { 
-       if (cl->process != 1){
-           tftp_error(4);
-           return(-1);
-       }
+
+    // подтверждение
+    if (opcode == 4) {
+        if (cl->process != 1){
+            tftp_error(4);
+            return(-1);
+        }
+
+        p = (uint16_t *)(buf+2);
+        block = ntohs(*p);
+        if (block == cl->pack) {
+            ++(cl->pack);
+            p = (uint16_t *)buf;
+            *p = htons(3);  // DATA packet
+            ++p;
+            *p = htons(cl->pack);
+            ++p;
+            len = fread(p, 1, 512, cl->file);
+            if ((rez = send(cl->soc, buf, 4 + len, 0)) < 0) {
+                perror("server: sendto()");
+                tftp_error(4);
+                return(-1);
+            }
+            return 0;
+        } else {
+            // ничего не делаем, ждём другое подтверждение
+            return 0;
+        }
      }   
-    
+
+    // ошибка
     if (opcode == 5) {
         fprintf(stderr, "Error packet: ErrorCode=%d %s", ntohs(*((uint16_t *)(buf+2))), (char *)(buf + 4));
         return(-1);
